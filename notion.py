@@ -2,20 +2,26 @@ import os
 import re
 from notion_client import Client
 from dotenv import load_dotenv
-# Вставь свои данные сюда
+
 load_dotenv()
 
+# Configuration setup
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 if not NOTION_TOKEN:
-    raise ValueError("Ошибка: нету NOTION_TOKEN")
-PAGE_ID = "376c21eeae7880f5bbbff2b2c2c2ff85"
+    raise ValueError("Error: NOTION_TOKEN is missing from environment variables.")
 
-FILE_PATH = "notes.md" 
+# Fallback values if not specified in .env
+PAGE_ID = os.getenv("NOTION_PAGE_ID", "page_id")
+FILE_PATH = os.getenv("NOTION_FILE_PATH", "notes.md")
 
 notion = Client(auth=NOTION_TOKEN)
 
+
 def parse_text_to_rich_text(text):
-    """Токенизатор: чисто режет строку на текст, формулы и жирный шрифт"""
+    """
+    Tokenizer: splits a string into text, equations, and bold styles
+    for the Notion Rich Text structure.
+    """
     tokens = re.split(r'(\$\$.*?\$\$|\$.*?\$|\*\*.*?\*\*)', text)
     rich_text = []
     
@@ -23,6 +29,7 @@ def parse_text_to_rich_text(text):
         if not token:
             continue
             
+        # Inline and block equation processing within text strings
         if token.startswith('$') and token.endswith('$'):
             if token.startswith('$$') and token.endswith('$$') and len(token) > 4:
                 formula = token[2:-2].strip()
@@ -36,6 +43,7 @@ def parse_text_to_rich_text(text):
                 })
             continue
             
+        # Bold text processing
         if token.startswith('**') and token.endswith('**') and len(token) > 4:
             bold_content = token[2:-2]
             if bold_content:
@@ -46,6 +54,7 @@ def parse_text_to_rich_text(text):
                 })
             continue
             
+        # Plain text processing
         rich_text.append({
             "type": "text",
             "text": {"content": token}
@@ -53,16 +62,17 @@ def parse_text_to_rich_text(text):
         
     return rich_text
 
+
 def upload_content():
     if not os.path.exists(FILE_PATH):
-        print(f"Ошибка: Файл '{FILE_PATH}' не найден!")
+        print(f"Error: File '{FILE_PATH}' not found!")
         return
 
-    print(f"Читаю файл {FILE_PATH}...")
+    print(f"Reading file: {FILE_PATH}...")
     with open(FILE_PATH, "r", encoding="utf-8") as f:
         raw_text = f.read()
 
-    # Точечно чиним всратую строчку Клода в определении, убирая "shadow" и "еслидлялюбогох"
+    # Pre-processing: patching legacy formatting or specific text edge cases
     raw_text = raw_text.replace("shadow", "")
     raw_text = raw_text.replace(
         r"F(x, y) = \mathbf{0}_m, еслидлялюбогох \in X$",
@@ -78,10 +88,10 @@ def upload_content():
     for line in lines:
         clean_line = line.strip()
         
-        # Если строка пустая — это явный маркер конца абзаца
+        # Empty line handling (paragraph boundaries)
         if not clean_line:
-            # Добавим пустой блок для визуального отступа, если прошлый блок не был пустым
-            if blocks and blocks[-1]["type"] != "paragraph" or (blocks and blocks[-1]["paragraph"]["rich_text"]):
+            # Append empty block for visual padding if the last block wasn't empty
+            if blocks and (blocks[-1]["type"] != "paragraph" or blocks[-1]["paragraph"]["rich_text"]):
                 blocks.append({
                     "object": "block",
                     "type": "paragraph",
@@ -89,7 +99,7 @@ def upload_content():
                 })
             continue
 
-        # Обработка многострочных формул $$
+        # Multiline block equation processing ($$)
         if clean_line.startswith('$$') and clean_line.endswith('$$') and len(clean_line) > 4:
             formula = clean_line[2:-2].strip()
             if formula:
@@ -114,7 +124,7 @@ def upload_content():
             current_formula_lines.append(clean_line)
             continue
 
-        # Определяем тип текущей строки
+        # Block type parsing based on Markdown syntax
         if clean_line.startswith('# '):
             blocks.append({
                 "object": "block",
@@ -140,20 +150,18 @@ def upload_content():
                 "bulleted_list_item": {"rich_text": parse_text_to_rich_text(clean_line[2:].strip())}
             })
         elif clean_line.startswith('1. ') or clean_line.startswith('2. '):
-            # Бонус: поддержка нумерованных списков
+            # Support for numbered lists
             blocks.append({
                 "object": "block",
                 "type": "numbered_list_item",
                 "numbered_list_item": {"rich_text": parse_text_to_rich_text(clean_line[3:].strip())}
             })
         else:
-            # ЭТО ОБЫЧНЫЙ ТЕКСТ
-            # Умная склейка: если предыдущий блок ТОЖЕ был обычным параграфом (и не пустым), 
-            # мы дописываем текст туда, а не плодим новые блоки ("колбасу")
+            # Standard paragraph handling with smart line joining
             current_rich_text = parse_text_to_rich_text(clean_line)
             
+            # If the previous block is also a non-empty paragraph, append to it instead of making a new block
             if blocks and blocks[-1]["type"] == "paragraph" and blocks[-1]["paragraph"]["rich_text"]:
-                # Добавляем пробел между склеиваемыми строками
                 blocks[-1]["paragraph"]["rich_text"].append({"type": "text", "text": {"content": " "}})
                 blocks[-1]["paragraph"]["rich_text"].extend(current_rich_text)
             else:
@@ -163,19 +171,18 @@ def upload_content():
                     "paragraph": {"rich_text": current_rich_text}
                 })
 
-    # Очищаем пустые параграфы в самом конце, если они остались
+    # Clear dangling empty paragraphs at the end of the content structure
     blocks = [b for b in blocks if not (b["type"] == "paragraph" and not b["paragraph"]["rich_text"])]
 
+    # Batch upload to Notion API (50 blocks per request limit)
     if blocks:
-        print(f"Отправляю {len(blocks)} блоков в Notion...")
+        print(f"Sending {len(blocks)} blocks to Notion...")
         for i in range(0, len(blocks), 50):
             notion.blocks.children.append(block_id=PAGE_ID, children=blocks[i:i+50])
-        print("Заебись! Теперь всё идеально: списки отдельно, абзацы склеены, формулы рендерятся.")
+        print("Success! Content successfully synchronized, paragraphs joined, and formulas rendered.")
     else:
-        print("Нечего отправлять.")
+        print("No content changes to upload.")
+
 
 if __name__ == "__main__":
     upload_content()
-
-
-
